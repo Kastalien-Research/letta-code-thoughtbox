@@ -69,6 +69,79 @@ function findEnclosingCodeBlockStart(content: string, index: number): number {
   return -1;
 }
 
+function isIndexInsideMathBlock(content: string, indexToTest: number): boolean {
+  let inMath = false;
+  let mathFence: "$$" | "\\[" | null = null;
+  let pos = 0;
+  const lines = content.split("\n");
+
+  for (const line of lines) {
+    if (pos >= indexToTest) break;
+    const trimmed = line.trim();
+
+    if (!inMath) {
+      if (trimmed === "$$") {
+        inMath = true;
+        mathFence = "$$";
+      } else if (trimmed === "\\[") {
+        inMath = true;
+        mathFence = "\\[";
+      }
+    } else if (mathFence === "$$" && trimmed === "$$") {
+      inMath = false;
+      mathFence = null;
+    } else if (mathFence === "\\[" && trimmed === "\\]") {
+      inMath = false;
+      mathFence = null;
+    }
+
+    pos += line.length + 1;
+  }
+
+  return inMath;
+}
+
+function findEnclosingMathBlockStart(content: string, index: number): number {
+  if (!isIndexInsideMathBlock(content, index)) {
+    return -1;
+  }
+
+  let inMath = false;
+  let mathFence: "$$" | "\\[" | null = null;
+  let currentStart = -1;
+  let pos = 0;
+  const lines = content.split("\n");
+
+  for (const line of lines) {
+    if (pos >= index) break;
+    const trimmed = line.trim();
+
+    if (!inMath) {
+      if (trimmed === "$$") {
+        inMath = true;
+        mathFence = "$$";
+        currentStart = pos;
+      } else if (trimmed === "\\[") {
+        inMath = true;
+        mathFence = "\\[";
+        currentStart = pos;
+      }
+    } else if (mathFence === "$$" && trimmed === "$$") {
+      inMath = false;
+      mathFence = null;
+      currentStart = -1;
+    } else if (mathFence === "\\[" && trimmed === "\\]") {
+      inMath = false;
+      mathFence = null;
+      currentStart = -1;
+    }
+
+    pos += line.length + 1;
+  }
+
+  return inMath ? currentStart : -1;
+}
+
 // Minimum content length before we consider splitting
 // This prevents creating many tiny chunks which causes spacing issues
 // Higher value = fewer splits = cleaner output but more content re-rendering
@@ -94,8 +167,15 @@ export function findLastSafeSplitPoint(content: string): number {
   if (enclosingBlockStart !== -1) {
     return enclosingBlockStart;
   }
+  const enclosingMathStart = findEnclosingMathBlockStart(
+    content,
+    content.length,
+  );
+  if (enclosingMathStart !== -1) {
+    return enclosingMathStart;
+  }
 
-  // Search for the last double newline (\n\n) not in a code block
+  // Search for the last double newline (\n\n) not in a code/math block
   let searchStartIndex = content.length;
   while (searchStartIndex >= 0) {
     const dnlIndex = content.lastIndexOf("\n\n", searchStartIndex);
@@ -104,7 +184,10 @@ export function findLastSafeSplitPoint(content: string): number {
     }
 
     const potentialSplitPoint = dnlIndex + 2; // Split AFTER the \n\n
-    if (!isIndexInsideCodeBlock(content, potentialSplitPoint)) {
+    if (
+      !isIndexInsideCodeBlock(content, potentialSplitPoint) &&
+      !isIndexInsideMathBlock(content, potentialSplitPoint)
+    ) {
       return potentialSplitPoint;
     }
 

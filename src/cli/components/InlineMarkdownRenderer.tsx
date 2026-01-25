@@ -1,5 +1,6 @@
 import { Text } from "ink";
 import type React from "react";
+import { renderLatexToText, splitInlineMathSegments } from "../helpers/latex.js";
 import { colors } from "./colors.js";
 
 interface InlineMarkdownProps {
@@ -16,9 +17,39 @@ export const InlineMarkdown: React.FC<InlineMarkdownProps> = ({
   text,
   dimColor,
 }) => {
+  const segments = splitInlineMathSegments(text);
+  const nodes: React.ReactNode[] = [];
+
+  segments.forEach((segment, segmentIndex) => {
+    if (segment.type === "math") {
+      nodes.push(
+        <Text
+          key={`math-${segmentIndex}`}
+          color={colors.code.inline}
+          dimColor={dimColor}
+        >
+          {renderLatexToText(segment.value)}
+        </Text>,
+      );
+      return;
+    }
+
+    nodes.push(
+      ...renderInlineMarkdownSegment(segment.value, segmentIndex, dimColor),
+    );
+  });
+
+  return <>{nodes}</>;
+};
+
+function renderInlineMarkdownSegment(
+  text: string,
+  segmentIndex: number,
+  dimColor?: boolean,
+): React.ReactNode[] {
   // Early return for plain text without markdown (treat underscores as plain text)
   if (!/[*~`[]/.test(text)) {
-    return <>{text}</>;
+    return [text];
   }
 
   const nodes: React.ReactNode[] = [];
@@ -37,7 +68,7 @@ export const InlineMarkdown: React.FC<InlineMarkdownProps> = ({
     }
 
     const fullMatch = match[0];
-    const key = `m-${match.index}`;
+    const key = `m-${segmentIndex}-${match.index}`;
 
     // Handle different markdown patterns
     if (
@@ -114,8 +145,8 @@ export const InlineMarkdown: React.FC<InlineMarkdownProps> = ({
     nodes.push(text.slice(lastIndex));
   }
 
-  return <>{nodes}</>;
-};
+  return nodes;
+}
 
 // Test helper: expose the tokenizer logic for simple unit validation without rendering.
 // This mirrors the logic above; keep it in sync with InlineMarkdown for tests.

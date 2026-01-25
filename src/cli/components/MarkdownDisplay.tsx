@@ -1,6 +1,7 @@
 import { Box, Text, Transform } from "ink";
 import type React from "react";
 import { colors } from "./colors.js";
+import { renderLatexToText } from "../helpers/latex.js";
 import { InlineMarkdown } from "./InlineMarkdownRenderer.js";
 
 interface MarkdownDisplayProps {
@@ -17,6 +18,8 @@ const blockquoteRegex = /^>\s*(.*)$/;
 const hrRegex = /^[-*_]{3,}$/;
 const tableRowRegex = /^\|(.+)\|$/;
 const tableSeparatorRegex = /^\|[\s:]*[-]+[\s:]*(\|[\s:]*[-]+[\s:]*)+\|$/;
+const mathBlockStartRegex = /^\s*(\$\$|\\\[)\s*$/;
+const mathBlockSingleLineRegex = /^\s*(\$\$|\\\[)\s*(.+?)\s*(\$\$|\\\])\s*$/;
 
 // Header styles lookup
 const headerStyles: Record<
@@ -46,6 +49,10 @@ export const MarkdownDisplay: React.FC<MarkdownDisplayProps> = ({
 
   let inCodeBlock = false;
   let codeBlockContent: string[] = [];
+  let inMathBlock = false;
+  let mathBlockContent: string[] = [];
+  let mathBlockFence: "$$" | "\\[" | null = null;
+  let mathBlockStartIndex = 0;
 
   // Helper function to parse table cells from a row
   const parseTableCells = (row: string): string[] => {
@@ -152,6 +159,59 @@ export const MarkdownDisplay: React.FC<MarkdownDisplayProps> = ({
     // If we're inside a code block, collect the content
     if (inCodeBlock) {
       codeBlockContent.push(line);
+      index++;
+      continue;
+    }
+
+    // Handle single-line math blocks like $$ ... $$ or \[ ... \]
+    if (!inMathBlock) {
+      const singleLineMath = line.match(mathBlockSingleLineRegex);
+      if (singleLineMath?.[2]) {
+        contentBlocks.push(
+          <Box key={`math-${index}`} paddingLeft={2}>
+            <Text color={colors.code.inline} dimColor={dimColor} wrap="wrap">
+              {renderLatexToText(singleLineMath[2])}
+            </Text>
+          </Box>,
+        );
+        index++;
+        continue;
+      }
+    }
+
+    // Handle math block fences
+    if (mathBlockStartRegex.test(line) && !inMathBlock) {
+      inMathBlock = true;
+      mathBlockContent = [];
+      mathBlockFence = line.trim() === "$$" ? "$$" : "\\[";
+      mathBlockStartIndex = index;
+      index++;
+      continue;
+    }
+
+    if (inMathBlock) {
+      const isDollarFence = mathBlockFence === "$$";
+      const isClosingFence =
+        (isDollarFence && /^\s*\$\$\s*$/.test(line)) ||
+        (!isDollarFence && /^\s*\\\]\s*$/.test(line));
+
+      if (isClosingFence) {
+        const mathText = renderLatexToText(mathBlockContent.join("\n"));
+        contentBlocks.push(
+          <Box key={`math-${mathBlockStartIndex}`} paddingLeft={2}>
+            <Text color={colors.code.inline} dimColor={dimColor} wrap="wrap">
+              {mathText}
+            </Text>
+          </Box>,
+        );
+        inMathBlock = false;
+        mathBlockContent = [];
+        mathBlockFence = null;
+        index++;
+        continue;
+      }
+
+      mathBlockContent.push(line);
       index++;
       continue;
     }
@@ -295,6 +355,18 @@ export const MarkdownDisplay: React.FC<MarkdownDisplayProps> = ({
     contentBlocks.push(
       <Box key="unclosed-code" paddingLeft={2}>
         <Text color={colors.code.inline}>{code}</Text>
+      </Box>,
+    );
+  }
+
+  // Handle unclosed math block at end of input
+  if (inMathBlock && mathBlockContent.length > 0) {
+    const mathText = renderLatexToText(mathBlockContent.join("\n"));
+    contentBlocks.push(
+      <Box key={`math-${mathBlockStartIndex}-unclosed`} paddingLeft={2}>
+        <Text color={colors.code.inline} dimColor={dimColor} wrap="wrap">
+          {mathText}
+        </Text>
       </Box>,
     );
   }
