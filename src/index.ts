@@ -847,6 +847,16 @@ async function main(): Promise<void> {
     toolFilter.setEnabledTools(values.tools as string);
   }
 
+  // Initialize local MCP tools (best-effort, doesn't block on failure)
+  try {
+    const { refreshMcpTools } = await import("./mcp/manager");
+    await refreshMcpTools();
+  } catch (error) {
+    console.warn(
+      `Warning: Failed to load local MCP tools: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   // Set CLI permission overrides if provided
   if (values.allowedTools || values.disallowedTools) {
     const { cliPermissions } = await import("./permissions/cli");

@@ -4,6 +4,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HooksConfig } from "./hooks/types";
+import type { LocalMcpServerConfig } from "./mcp/types";
 import type { PermissionRules } from "./permissions/types";
 import { debugWarn } from "./utils/debug.js";
 import { exists, mkdir, readFile, writeFile } from "./utils/fs.js";
@@ -68,6 +69,8 @@ export interface Settings {
     provider: "openai";
     timestamp: number;
   };
+  // Local MCP server configurations (client-side MCP tools)
+  mcpServers?: LocalMcpServerConfig[];
 }
 
 export interface ProjectSettings {
@@ -95,6 +98,7 @@ const DEFAULT_SETTINGS: Settings = {
   sessionContextEnabled: true,
   memoryReminderInterval: 5, // number = prompt memory check every N turns
   globalSharedBlockIds: {},
+  mcpServers: [],
 };
 
 const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
