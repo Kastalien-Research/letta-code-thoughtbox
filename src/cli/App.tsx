@@ -5,6 +5,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { APIError, APIUserAbortError } from "@letta-ai/letta-client/core/error";
 import type {
+  CreateMessageRequestParams,
+  CreateMessageResult,
+  CreateMessageResultWithTools,
+  ElicitRequestParams,
+  ElicitResult,
+} from "@modelcontextprotocol/sdk/types";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types";
+import type {
   AgentState,
   MessageCreate,
 } from "@letta-ai/letta-client/resources/agents/agents";
@@ -90,6 +98,7 @@ import {
   type ToolExecutionResult,
 } from "../tools/manager";
 import { debugLog, debugWarn } from "../utils/debug";
+import { setMcpInteractionHandlers } from "../mcp/interactions";
 import {
   handleMcpAdd,
   handleMcpListLocal,
@@ -125,6 +134,8 @@ import { HooksManager } from "./components/HooksManager";
 import { InlineQuestionApproval } from "./components/InlineQuestionApproval";
 import { Input } from "./components/InputRich";
 import { McpConnectFlow } from "./components/McpConnectFlow";
+import { McpElicitationFlow } from "./components/McpElicitationFlow";
+import { McpSamplingDialog } from "./components/McpSamplingDialog";
 import { McpSelector } from "./components/McpSelector";
 import { MemfsTreeViewer } from "./components/MemfsTreeViewer";
 import { MemoryTabViewer } from "./components/MemoryTabViewer";
@@ -1029,11 +1040,34 @@ export default function App({
     | "new"
     | "mcp"
     | "mcp-connect"
+    | "mcp-elicitation"
+    | "mcp-sampling"
     | "help"
     | "hooks"
     | "connect"
     | null;
   const [activeOverlay, setActiveOverlay] = useState<ActiveOverlay>(null);
+  type McpElicitationState = {
+    serverName: string;
+    params: ElicitRequestParams;
+    resolve: (result: ElicitResult) => void;
+    reject: (error: Error) => void;
+    queuedAt: number;
+  };
+  type McpSamplingState = {
+    serverName: string;
+    params: CreateMessageRequestParams;
+    resolve: (
+      result: CreateMessageResult | CreateMessageResultWithTools,
+    ) => void;
+    reject: (error: Error) => void;
+    queuedAt: number;
+  };
+  const [mcpElicitation, setMcpElicitation] =
+    useState<McpElicitationState | null>(null);
+  const [mcpSampling, setMcpSampling] = useState<McpSamplingState | null>(null);
+  const mcpElicitationQueueRef = useRef<McpElicitationState[]>([]);
+  const mcpSamplingQueueRef = useRef<McpSamplingState[]>([]);
   const [memorySyncConflicts, setMemorySyncConflicts] = useState<
     MemorySyncConflict[] | null
   >(null);
@@ -1060,6 +1094,123 @@ export default function App({
     setSearchQuery("");
     setModelSelectorOptions({});
   }, []);
+
+  const activateNextMcpInteraction = useCallback(() => {
+    const nextElicitation = mcpElicitationQueueRef.current[0] ?? null;
+    const nextSampling = mcpSamplingQueueRef.current[0] ?? null;
+
+    if (!nextElicitation && !nextSampling) {
+      setActiveOverlay(null);
+      return;
+    }
+
+    if (
+      nextElicitation &&
+      (!nextSampling || nextElicitation.queuedAt <= nextSampling.queuedAt)
+    ) {
+      mcpElicitationQueueRef.current.shift();
+      setMcpElicitation(nextElicitation);
+      setMcpSampling(null);
+      setActiveOverlay("mcp-elicitation");
+      return;
+    }
+
+    if (nextSampling) {
+      mcpSamplingQueueRef.current.shift();
+      setMcpSampling(nextSampling);
+      setMcpElicitation(null);
+      setActiveOverlay("mcp-sampling");
+    }
+  }, []);
+
+  const enqueueMcpElicitation = useCallback(
+    (state: Omit<McpElicitationState, "queuedAt">) => {
+      const queuedState = { ...state, queuedAt: Date.now() };
+      if (mcpElicitation || mcpSampling) {
+        mcpElicitationQueueRef.current.push(queuedState);
+        return;
+      }
+      setMcpElicitation(queuedState);
+      setActiveOverlay("mcp-elicitation");
+    },
+    [mcpElicitation, mcpSampling],
+  );
+
+  const enqueueMcpSampling = useCallback(
+    (state: Omit<McpSamplingState, "queuedAt">) => {
+      const queuedState = { ...state, queuedAt: Date.now() };
+      if (mcpElicitation || mcpSampling) {
+        mcpSamplingQueueRef.current.push(queuedState);
+        return;
+      }
+      setMcpSampling(queuedState);
+      setActiveOverlay("mcp-sampling");
+    },
+    [mcpElicitation, mcpSampling],
+  );
+
+  useEffect(() => {
+    setMcpInteractionHandlers({
+      onElicitation: ({ serverName, params }) =>
+        new Promise((resolve, reject) => {
+          enqueueMcpElicitation({ serverName, params, resolve, reject });
+        }),
+      onSampling: ({ serverName, params }) =>
+        new Promise((resolve, reject) => {
+          enqueueMcpSampling({ serverName, params, resolve, reject });
+        }),
+    });
+
+    return () => {
+      setMcpInteractionHandlers(null);
+    };
+  }, [enqueueMcpElicitation, enqueueMcpSampling]);
+
+  const resolveMcpElicitation = useCallback(
+    (result: ElicitResult) => {
+      if (!mcpElicitation) return;
+      mcpElicitation.resolve(result);
+      setMcpElicitation(null);
+      activateNextMcpInteraction();
+    },
+    [activateNextMcpInteraction, mcpElicitation],
+  );
+
+  const cancelMcpElicitation = useCallback(() => {
+    resolveMcpElicitation({ action: "cancel" });
+  }, [resolveMcpElicitation]);
+
+  const resolveMcpSampling = useCallback(
+    (responseText: string): CreateMessageResult | CreateMessageResultWithTools => {
+      return {
+        model: "letta-code-manual",
+        role: "assistant",
+        content: { type: "text", text: responseText },
+        stopReason: "endTurn",
+      };
+    },
+    [],
+  );
+
+  const submitMcpSampling = useCallback(
+    (responseText: string) => {
+      if (!mcpSampling) return;
+      const result = resolveMcpSampling(responseText);
+      mcpSampling.resolve(result);
+      setMcpSampling(null);
+      activateNextMcpInteraction();
+    },
+    [activateNextMcpInteraction, mcpSampling, resolveMcpSampling],
+  );
+
+  const cancelMcpSampling = useCallback(() => {
+    if (!mcpSampling) return;
+    mcpSampling.reject(
+      new McpError(ErrorCode.InternalError, "Sampling cancelled by user"),
+    );
+    setMcpSampling(null);
+    activateNextMcpInteraction();
+  }, [activateNextMcpInteraction, mcpSampling]);
 
   // Queued overlay action - executed after end_turn when user makes a selection
   // while agent is busy (streaming/executing tools)
@@ -10436,6 +10587,26 @@ Plan file path: ${planFilePath}`;
                   refreshDerived();
                 }}
                 onCancel={closeOverlay}
+              />
+            )}
+
+            {/* MCP Elicitation - form-based input requested by MCP server */}
+            {activeOverlay === "mcp-elicitation" && mcpElicitation && (
+              <McpElicitationFlow
+                serverName={mcpElicitation.serverName}
+                request={mcpElicitation.params}
+                onSubmit={resolveMcpElicitation}
+                onCancel={cancelMcpElicitation}
+              />
+            )}
+
+            {/* MCP Sampling - manual response to MCP sampling request */}
+            {activeOverlay === "mcp-sampling" && mcpSampling && (
+              <McpSamplingDialog
+                serverName={mcpSampling.serverName}
+                request={mcpSampling.params}
+                onSubmit={submitMcpSampling}
+                onCancel={cancelMcpSampling}
               />
             )}
 
