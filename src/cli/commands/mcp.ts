@@ -7,6 +7,7 @@ import type {
   CreateStreamableHTTPMcpServer,
 } from "@letta-ai/letta-client/resources/mcp-servers/mcp-servers";
 import { getClient } from "../../agent/client";
+import type { LocalMcpServerConfig } from "../../mcp/types";
 import type { Buffers, Line } from "../helpers/accumulator";
 import { formatErrorDetails } from "../helpers/errorFormatter";
 
@@ -119,6 +120,8 @@ interface McpAddArgs {
   args: string[];
   headers: Record<string, string>;
   authToken: string | null;
+  env: Record<string, string>;
+  local: boolean;
 }
 
 function parseMcpAddArgs(parts: string[]): McpAddArgs | null {
@@ -129,13 +132,21 @@ function parseMcpAddArgs(parts: string[]): McpAddArgs | null {
   let command: string | null = null;
   const args: string[] = [];
   const headers: Record<string, string> = {};
+  const env: Record<string, string> = {};
   let authToken: string | null = null;
+  let local = false;
 
   let i = 0;
   while (i < parts.length) {
     const part = parts[i];
 
-    if (part === "--transport" || part === "-t") {
+    if (part === "--local" || part === "--client") {
+      local = true;
+      i++;
+    } else if (part === "--remote" || part === "--server") {
+      local = false;
+      i++;
+    } else if (part === "--transport" || part === "-t") {
       i++;
       const transportValue = parts[i]?.toLowerCase();
       if (transportValue === "http" || transportValue === "streamable_http") {
@@ -163,6 +174,16 @@ function parseMcpAddArgs(parts: string[]): McpAddArgs | null {
     } else if (part === "--auth" || part === "-a") {
       i++;
       authToken = parts[i] || null;
+      i++;
+    } else if (part === "--env" || part === "-e") {
+      i++;
+      const envValue = parts[i];
+      if (envValue) {
+        const [key, ...rest] = envValue.split("=");
+        if (key && rest.length > 0) {
+          env[key.trim()] = rest.join("=").trim();
+        }
+      }
       i++;
     } else if (!name) {
       name = part || null;
@@ -202,6 +223,8 @@ function parseMcpAddArgs(parts: string[]): McpAddArgs | null {
     args,
     headers,
     authToken: authToken || null,
+    env,
+    local,
   };
 }
 
@@ -220,7 +243,7 @@ export async function handleMcpAdd(
       ctx.buffersRef,
       ctx.refreshDerived,
       msg,
-      'Usage: /mcp add --transport <http|sse|stdio> <name> <url|command> [--header "key: value"] [--auth token]\n\nExamples:\n  /mcp add --transport http notion https://mcp.notion.com/mcp\n  /mcp add --transport http secure-api https://api.example.com/mcp --header "Authorization: Bearer token"',
+      'Usage: /mcp add --transport <http|sse|stdio> <name> <url|command> [--header "key: value"] [--auth token] [--local]\n\nExamples:\n  /mcp add --transport http notion https://mcp.notion.com/mcp\n  /mcp add --transport http secure-api https://api.example.com/mcp --header "Authorization: Bearer token"\n  /mcp add --local --transport stdio my-server "./mcp-server" --env "API_KEY=token"',
       false,
     );
     return;
@@ -238,6 +261,54 @@ export async function handleMcpAdd(
   ctx.setCommandRunning(true);
 
   try {
+    if (args.local) {
+      const {
+        addLocalMcpServer,
+        buildLocalMcpConfig,
+        refreshMcpTools,
+      } = await import("../../mcp/manager");
+
+      const config = buildLocalMcpConfig({
+        name: args.name,
+        transport: args.transport === "http" ? "streamable_http" : args.transport,
+        url: args.url,
+        command: args.command,
+        args: args.args,
+        headers: args.headers,
+        authToken: args.authToken,
+        env: args.env,
+      });
+
+      addLocalMcpServer(config);
+      const refresh = await refreshMcpTools();
+      const serverStatus = refresh.servers.find(
+        (server) => server.name === args.name,
+      );
+      const toolCount = serverStatus?.toolCount ?? 0;
+
+      if (serverStatus?.error) {
+        updateCommandResult(
+          ctx.buffersRef,
+          ctx.refreshDerived,
+          cmdId,
+          msg,
+          `Saved local MCP server "${args.name}" (${config.transport})\nWarning: ${serverStatus.error}\nLoaded ${toolCount} tool${toolCount === 1 ? "" : "s"} from cache`,
+          true,
+        );
+      } else {
+        updateCommandResult(
+          ctx.buffersRef,
+          ctx.refreshDerived,
+          cmdId,
+          msg,
+          `Saved local MCP server "${args.name}" (${config.transport})\nLoaded ${toolCount} tool${toolCount === 1 ? "" : "s"} from server`,
+          true,
+        );
+      }
+
+      return;
+    }
+
     const client = await getClient();
 
     let config:
@@ -349,6 +420,191 @@ export async function handleMcpAdd(
   }
 }
 
+function formatLocalServerTarget(server: LocalMcpServerConfig): string {
+  if (server.transport === "stdio") {
+    const args = server.args?.length ? ` ${server.args.join(" ")}` : "";
+    return `${server.command ?? ""}${args}`.trim() || "stdio";
+  }
+  return server.url ?? "unknown";
+}
+
+export async function handleMcpListLocal(
+  ctx: McpCommandContext,
+  msg: string,
+  commandStr: string,
+): Promise<void> {
+  const parts = parseCommandArgs(commandStr);
+  if (parts.includes("--help") || parts.includes("-h")) {
+    addCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      msg,
+      "Usage: /mcp list\nLists local MCP servers configured for the CLI.",
+      true,
+    );
+    return;
+  }
+
+  const { listLocalMcpServers } = await import("../../mcp/manager");
+  const servers = listLocalMcpServers();
+
+  if (servers.length === 0) {
+    addCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      msg,
+      "No local MCP servers configured.\nUse /mcp add --local to add one.",
+      true,
+    );
+    return;
+  }
+
+  const lines = servers.map((server) => {
+    const target = formatLocalServerTarget(server);
+    const status = server.enabled === false ? " (disabled)" : "";
+    return `- ${server.name} · ${server.transport} · ${target}${status}`;
+  });
+
+  addCommandResult(
+    ctx.buffersRef,
+    ctx.refreshDerived,
+    msg,
+    `Local MCP servers:\n${lines.join("\n")}`,
+    true,
+  );
+}
+
+export async function handleMcpRemoveLocal(
+  ctx: McpCommandContext,
+  msg: string,
+  commandStr: string,
+): Promise<void> {
+  const parts = parseCommandArgs(commandStr);
+  const name = parts[0];
+  if (!name) {
+    addCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      msg,
+      "Usage: /mcp remove <name>",
+      false,
+    );
+    return;
+  }
+
+  const cmdId = addCommandResult(
+    ctx.buffersRef,
+    ctx.refreshDerived,
+    msg,
+    `Removing local MCP server "${name}"...`,
+    false,
+    "running",
+  );
+  ctx.setCommandRunning(true);
+
+  try {
+    const { refreshMcpTools, removeLocalMcpServer } = await import(
+      "../../mcp/manager"
+    );
+    const removed = await removeLocalMcpServer(name);
+
+    if (!removed) {
+      updateCommandResult(
+        ctx.buffersRef,
+        ctx.refreshDerived,
+        cmdId,
+        msg,
+        `Local MCP server "${name}" not found.`,
+        false,
+      );
+      return;
+    }
+
+    await refreshMcpTools();
+
+    updateCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      cmdId,
+      msg,
+      `Removed local MCP server "${name}".`,
+      true,
+    );
+  } catch (error) {
+    const errorDetails = formatErrorDetails(error, "");
+    updateCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      cmdId,
+      msg,
+      `Failed: ${errorDetails}`,
+      false,
+    );
+  } finally {
+    ctx.setCommandRunning(false);
+  }
+}
+
+export async function handleMcpRefreshLocal(
+  ctx: McpCommandContext,
+  msg: string,
+): Promise<void> {
+  const cmdId = addCommandResult(
+    ctx.buffersRef,
+    ctx.refreshDerived,
+    msg,
+    "Refreshing local MCP tools...",
+    false,
+    "running",
+  );
+  ctx.setCommandRunning(true);
+
+  try {
+    const { refreshMcpTools } = await import("../../mcp/manager");
+    const result = await refreshMcpTools();
+
+    if (result.servers.length === 0) {
+      updateCommandResult(
+        ctx.buffersRef,
+        ctx.refreshDerived,
+        cmdId,
+        msg,
+        "No local MCP servers configured.\nUse /mcp add --local to add one.",
+        true,
+      );
+      return;
+    }
+
+    const lines = result.servers.map((server) => {
+      if (server.error) {
+        return `- ${server.name}: ${server.error} (using ${server.toolCount} cached tools)`;
+      }
+      return `- ${server.name}: ${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}`;
+    });
+
+    updateCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      cmdId,
+      msg,
+      `Refreshed local MCP tools (${result.totalTools} total)\n${lines.join("\n")}`,
+      true,
+    );
+  } catch (error) {
+    const errorDetails = formatErrorDetails(error, "");
+    updateCommandResult(
+      ctx.buffersRef,
+      ctx.refreshDerived,
+      cmdId,
+      msg,
+      `Failed: ${errorDetails}`,
+      false,
+    );
+  } finally {
+    ctx.setCommandRunning(false);
+  }
+}
+
 // Show usage help
 export function handleMcpUsage(ctx: McpCommandContext, msg: string): void {
   addCommandResult(
@@ -358,9 +614,13 @@ export function handleMcpUsage(ctx: McpCommandContext, msg: string): void {
     "Usage: /mcp [subcommand ...]\n" +
       "  /mcp                  - Open MCP server manager\n" +
       "  /mcp add ...          - Add a new server (without OAuth)\n" +
+      "  /mcp list             - List local MCP servers\n" +
+      "  /mcp remove <name>    - Remove local MCP server\n" +
+      "  /mcp refresh          - Refresh local MCP tools\n" +
       "  /mcp connect          - Interactive wizard with OAuth support\n\n" +
       "Examples:\n" +
-      "  /mcp add --transport http notion https://mcp.notion.com/mcp",
+      "  /mcp add --transport http notion https://mcp.notion.com/mcp\n" +
+      "  /mcp add --local --transport stdio my-server ./mcp-server",
     false,
   );
 }

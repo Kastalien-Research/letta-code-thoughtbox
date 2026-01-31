@@ -803,6 +803,9 @@ export async function handleHeadlessCommand(
 
   // Output init event for stream-json format
   if (outputFormat === "stream-json") {
+    const { listLocalMcpServers } = await import("./mcp/manager");
+    const localMcpServers = listLocalMcpServers();
+
     const initEvent: SystemInitMessage = {
       type: "system",
       subtype: "init",
@@ -813,7 +816,10 @@ export async function handleHeadlessCommand(
       tools:
         agent.tools?.map((t) => t.name).filter((n): n is string => !!n) || [],
       cwd: process.cwd(),
-      mcp_servers: [],
+      mcp_servers: localMcpServers.map((server) => ({
+        name: server.name,
+        status: server.enabled === false ? "disabled" : "configured",
+      })),
       permission_mode: "",
       slash_commands: [],
       uuid: `init-${agent.id}`,

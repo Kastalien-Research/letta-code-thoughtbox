@@ -92,6 +92,9 @@ import {
 import { debugLog, debugWarn } from "../utils/debug";
 import {
   handleMcpAdd,
+  handleMcpListLocal,
+  handleMcpRefreshLocal,
+  handleMcpRemoveLocal,
   handleMcpUsage,
   type McpCommandContext,
 } from "./commands/mcp";
@@ -5047,6 +5050,26 @@ export default function App({
             // Pass the full command string after "add" to preserve quotes
             const afterAdd = afterMcp.slice(firstWord.length).trim();
             await handleMcpAdd(mcpCtx, msg, afterAdd);
+            return { submitted: true };
+          }
+
+          // /mcp list - list local MCP servers
+          if (firstWord === "list") {
+            const afterList = afterMcp.slice(firstWord.length).trim();
+            await handleMcpListLocal(mcpCtx, msg, afterList);
+            return { submitted: true };
+          }
+
+          // /mcp remove <name> - remove local MCP server
+          if (firstWord === "remove" || firstWord === "delete") {
+            const afterRemove = afterMcp.slice(firstWord.length).trim();
+            await handleMcpRemoveLocal(mcpCtx, msg, afterRemove);
+            return { submitted: true };
+          }
+
+          // /mcp refresh - refresh local MCP tools
+          if (firstWord === "refresh" || firstWord === "sync") {
+            await handleMcpRefreshLocal(mcpCtx, msg);
             return { submitted: true };
           }
 

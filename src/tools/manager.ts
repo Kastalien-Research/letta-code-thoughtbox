@@ -4,6 +4,7 @@ import { getAllSubagentConfigs } from "../agent/subagents";
 import { INTERRUPTED_BY_USER } from "../constants";
 import { runPostToolUseHooks, runPreToolUseHooks } from "../hooks";
 import { telemetry } from "../telemetry";
+import { toolFilter } from "./filter";
 import { TOOL_DEFINITIONS, type ToolName } from "./toolDefinitions";
 
 export const TOOL_NAMES = Object.keys(TOOL_DEFINITIONS) as ToolName[];
@@ -236,6 +237,7 @@ type ToolRegistry = Map<string, ToolDefinition>;
 // This prevents Bun's bundler from creating duplicate instances
 const REGISTRY_KEY = Symbol.for("@letta/toolRegistry");
 const SWITCH_LOCK_KEY = Symbol.for("@letta/toolSwitchLock");
+const DYNAMIC_REGISTRY_KEY = Symbol.for("@letta/dynamicToolRegistry");
 
 interface SwitchLockState {
   promise: Promise<void> | null;
@@ -246,6 +248,7 @@ interface SwitchLockState {
 type GlobalWithToolState = typeof globalThis & {
   [REGISTRY_KEY]?: ToolRegistry;
   [SWITCH_LOCK_KEY]?: SwitchLockState;
+  [DYNAMIC_REGISTRY_KEY]?: ToolRegistry;
 };
 
 function getRegistry(): ToolRegistry {
@@ -264,7 +267,16 @@ function getSwitchLock(): SwitchLockState {
   return global[SWITCH_LOCK_KEY];
 }
 
+function getDynamicRegistry(): ToolRegistry {
+  const global = globalThis as GlobalWithToolState;
+  if (!global[DYNAMIC_REGISTRY_KEY]) {
+    global[DYNAMIC_REGISTRY_KEY] = new Map();
+  }
+  return global[DYNAMIC_REGISTRY_KEY];
+}
+
 const toolRegistry = getRegistry();
+const dynamicToolRegistry = getDynamicRegistry();
 
 /**
  * Acquires the toolset switch lock. Call before starting async tool loading.
@@ -353,6 +365,13 @@ export interface ClientTool {
   parameters?: { [key: string]: unknown } | null;
 }
 
+export interface ExternalToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: JsonSchema;
+  execute: (args: ToolArgs) => Promise<unknown>;
+}
+
 /**
  * Get all loaded tools in the format expected by the Letta API's client_tools field.
  * Maps internal tool names to server-facing names for proper tool invocation.
@@ -366,6 +385,64 @@ export function getClientToolsFromRegistry(): ClientTool[] {
       parameters: tool.schema.input_schema,
     };
   });
+}
+
+function mergeDynamicTools(targetRegistry: ToolRegistry): void {
+  const filterActive = toolFilter.isActive();
+  for (const [name, tool] of dynamicToolRegistry) {
+    if (filterActive && !toolFilter.isEnabled(name)) {
+      continue;
+    }
+    if (targetRegistry.has(name)) {
+      console.warn(`Dynamic tool "${name}" collides with existing tool, skipping`);
+      continue;
+    }
+    targetRegistry.set(name, tool);
+  }
+}
+
+/**
+ * Replace dynamic tools (e.g., MCP tools) and merge into the active registry.
+ */
+export function setDynamicTools(tools: ExternalToolDefinition[]): void {
+  acquireSwitchLock();
+  try {
+    // Remove previously registered dynamic tools from the live registry
+    for (const name of dynamicToolRegistry.keys()) {
+      toolRegistry.delete(name);
+    }
+
+    dynamicToolRegistry.clear();
+
+    for (const tool of tools) {
+      if (!toolFilter.isEnabled(tool.name)) {
+        continue;
+      }
+
+      const toolSchema: ToolSchema = {
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+      };
+
+      dynamicToolRegistry.set(tool.name, {
+        schema: toolSchema,
+        fn: tool.execute,
+      });
+    }
+
+    for (const [name, tool] of dynamicToolRegistry) {
+      if (toolRegistry.has(name)) {
+        console.warn(
+          `Dynamic tool "${name}" collides with existing tool, skipping`,
+        );
+        continue;
+      }
+      toolRegistry.set(name, tool);
+    }
+  } finally {
+    releaseSwitchLock();
+  }
 }
 
 /**
@@ -524,6 +601,9 @@ export async function loadSpecificTools(toolNames: string[]): Promise<void> {
       });
     }
 
+    // Include any dynamic tools (e.g., MCP)
+    mergeDynamicTools(newRegistry);
+
     // Atomic swap - no yields between clear and populate
     replaceRegistry(newRegistry);
   } finally {
@@ -637,6 +717,9 @@ export async function loadTools(modelIdentifier?: string): Promise<void> {
         });
       }
     }
+
+    // Include any dynamic tools (e.g., MCP)
+    mergeDynamicTools(newRegistry);
 
     // Atomic swap - no yields between clear and populate
     replaceRegistry(newRegistry);
